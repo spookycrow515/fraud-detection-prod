@@ -1,5 +1,5 @@
 from pathlib import Path
-
+import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -8,6 +8,8 @@ from sklearn.metrics import classification_report, f1_score, precision_score, re
 from sklearn.model_selection import train_test_split
 
 DATA_PATH = Path(__file__).parent / "creditcard_2023.csv"
+MODEL_PATH = Path(__file__).parent / "fraud_model.pkl"
+ARTIFACTS_PATH = Path(__file__).parent / "fraud_artifacts.pkl"
 FEATURE_COLUMNS = [f"V{i}" for i in range(1, 29)] + ["Amount"]
 TARGET_COLUMN = "Class"
 
@@ -18,6 +20,38 @@ def load_data() -> pd.DataFrame:
         st.stop()
     return pd.read_csv(DATA_PATH)
 
+def save_artifacts(model, artifacts, cleaned_df):
+    joblib.dump(model, MODEL_PATH)
+
+    cached = {
+        "metrics": artifacts["metrics"],
+        "y_test": artifacts["y_test"],
+        "fraud_proba": artifacts["fraud_proba"],
+
+        # small sample only
+        "sample_df": cleaned_df[FEATURE_COLUMNS + [TARGET_COLUMN]].sample(
+            min(1000, len(cleaned_df)),
+            random_state=42
+        ),
+    }
+
+    joblib.dump(cached, ARTIFACTS_PATH)
+
+
+def load_artifacts():
+    if not MODEL_PATH.exists() or not ARTIFACTS_PATH.exists():
+        return None
+
+    model = joblib.load(MODEL_PATH)
+    cached = joblib.load(ARTIFACTS_PATH)
+
+    return {
+        "model": model,
+        "metrics": cached["metrics"],
+        "y_test": cached["y_test"],
+        "fraud_proba": cached["fraud_proba"],
+        "cleaned_df": cached["sample_df"],
+    }
 
 def assess_data_quality(df: pd.DataFrame) -> dict:
     return {
@@ -371,12 +405,60 @@ def main() -> None:
     if "decision_threshold" not in st.session_state:
         st.session_state.decision_threshold = 0.5
 
-    df = load_data()
-    quality = assess_data_quality(df)
-    cleaned_df, cleaning_steps = clean_data(df)
-    artifacts = train_model(cleaned_df)
-    model = artifacts["model"]
-    metrics = artifacts["metrics"]
+    if DATA_PATH.exists():
+
+        df = load_data()
+
+        quality = assess_data_quality(df)
+
+        cleaned_df, cleaning_steps = clean_data(df)
+
+        artifacts = train_model(cleaned_df)
+
+        model = artifacts["model"]
+
+        metrics = artifacts["metrics"]
+
+        save_artifacts(
+            model=model,
+            artifacts=artifacts,
+            cleaned_df=cleaned_df,
+        )
+
+    else:
+
+        cached = load_artifacts()
+
+        if cached is None:
+            st.error(
+                "Dataset missing and no saved model found. "
+                "Run once with creditcard_2023.csv present."
+            )
+            st.stop()
+
+        model = cached["model"]
+
+        metrics = cached["metrics"]
+
+        cleaned_df = cached["cleaned_df"]
+
+        artifacts = {
+            "y_test": cached["y_test"],
+            "fraud_proba": cached["fraud_proba"],
+        }
+
+        quality = {
+            "missing_values": 0,
+            "duplicate_rows": 0,
+            "infinite_values": 0,
+            "invalid_class_values": 0,
+        }
+
+        cleaning_steps = [
+            "Loaded previously trained model."
+        ]
+
+        df = cleaned_df
 
     with st.expander("Data quality & model training", expanded=False):
         quality_col1, quality_col2, quality_col3, quality_col4 = st.columns(4)

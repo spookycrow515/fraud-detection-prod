@@ -199,7 +199,11 @@ def render_detector(cleaned_df: pd.DataFrame, model: RandomForestClassifier) -> 
 
 
 def render_dashboard(cleaned_df: pd.DataFrame, artifacts: dict) -> None:
-    st.subheader("Class balance & fraud rate")
+    st.markdown("""
+    <div class='custom-box'>
+    <h3>Dataset Overview</h3>
+    </div>
+    """, unsafe_allow_html=True)
 
     class_counts = cleaned_df[TARGET_COLUMN].value_counts().sort_index()
     legit_count = int(class_counts.get(0, 0))
@@ -249,8 +253,118 @@ def render_dashboard(cleaned_df: pd.DataFrame, artifacts: dict) -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Credit Card Fraud Detection", page_icon="💳", layout="wide")
-    st.title("Credit Card Fraud Detection")
-    st.caption("Load data, clean it, train a Random Forest, and score new transactions.")
+    st.markdown("""
+    <style>
+
+    /* Main app */
+    .stApp {
+        background-color: #f5f7fb;
+    }
+
+    /* Header */
+    .main-header {
+        background: linear-gradient(135deg, #1e3c72, #2a5298);
+        padding: 25px;
+        border-radius: 15px;
+        text-align: center;
+        color: white;
+        margin-bottom: 20px;
+        box-shadow: 0px 4px 15px rgba(0,0,0,0.15);
+    }
+
+    /* Section containers */
+    .custom-box {
+        background: white;
+        padding: 20px;
+        border-radius: 12px;
+        border-left: 6px solid #2a5298;
+        box-shadow: 0px 3px 10px rgba(0,0,0,0.08);
+        margin-bottom: 15px;
+    }
+
+    /* Horizontal separator */
+    hr {
+        border: none;
+        height: 2px;
+        background: linear-gradient(to right,#2a5298,#00c6ff);
+        margin: 20px 0;
+    }
+
+    /* Metrics */
+    .metric-card {
+        background: white;
+        padding: 15px;
+        border-radius: 12px;
+        text-align: center;
+        box-shadow: 0px 3px 8px rgba(0,0,0,0.1);
+    }
+
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 12px;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        background-color: #eef2ff;
+        border-radius: 10px;
+        padding: 10px 20px;
+    }
+
+    .stTabs [aria-selected="true"] {
+        background-color: #2a5298 !important;
+        color: white !important;
+    }
+
+    /* Buttons */
+    .stButton > button {
+        background: linear-gradient(135deg,#2a5298,#00c6ff);
+        color: white;
+        border-radius: 10px;
+        border: none;
+        font-weight: bold;
+        padding: 0.5rem 1.5rem;
+    }
+
+    .stButton > button:hover {
+        transform: scale(1.02);
+        transition: 0.2s;
+    }
+
+    /* Success card */
+    .success-box {
+        background: #e8fff0;
+        border-left: 6px solid #00b894;
+        padding: 15px;
+        border-radius: 10px;
+        margin-top: 10px;
+    }
+
+    /* Fraud card */
+    .fraud-box {
+        background: #fff0f0;
+        border-left: 6px solid #ff4757;
+        padding: 15px;
+        border-radius: 10px;
+        margin-top: 10px;
+    }
+
+    /* Sidebar */
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg,#1e3c72,#2a5298);
+    }
+
+    section[data-testid="stSidebar"] * {
+        color: white;
+    }
+
+    </style>
+    """, unsafe_allow_html=True)
+    st.markdown("""
+    <div class='main-header'>
+        <h1>Credit Card Fraud Detection System</h1>
+        <p>Machine Learning Powered Fraud Analysis Dashboard</p>
+    </div>
+    """, unsafe_allow_html=True)
 
     if "transaction_history" not in st.session_state:
         st.session_state.transaction_history = []

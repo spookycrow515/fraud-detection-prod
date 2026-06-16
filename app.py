@@ -23,23 +23,29 @@ def load_data() -> pd.DataFrame:
 
 def save_artifacts(model, artifacts, cleaned_df):
     joblib.dump(model, MODEL_PATH)
+
     cached = {
         "metrics": artifacts["metrics"],
         "y_test": artifacts["y_test"],
         "fraud_proba": artifacts["fraud_proba"],
+
+        # small sample only
         "sample_df": cleaned_df[FEATURE_COLUMNS + [TARGET_COLUMN]].sample(
             min(1000, len(cleaned_df)),
             random_state=42
         ),
     }
+
     joblib.dump(cached, ARTIFACTS_PATH)
 
 
 def load_artifacts():
     if not MODEL_PATH.exists() or not ARTIFACTS_PATH.exists():
         return None
+
     model = joblib.load(MODEL_PATH)
     cached = joblib.load(ARTIFACTS_PATH)
+
     return {
         "model": model,
         "metrics": cached["metrics"],
@@ -99,8 +105,7 @@ def clean_data(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     return cleaned.reset_index(drop=True), steps
 
 
-# Adding balancing_method context into the cache signature
-# @st.cache_resource(show_spinner="Training Random Forest model...")
+@st.cache_resource(show_spinner="Training pipeline model...")
 def get_or_train_model(df: pd.DataFrame, balancing_method: str) -> dict:
     return train_configured_model(df, balancing_method)
 
@@ -215,7 +220,7 @@ def render_dashboard(cleaned_df: pd.DataFrame, artifacts: dict) -> None:
     stat_col1.metric("Total transactions", f"{total_count:,}")
     stat_col2.metric("Legitimate", f"{legit_count:,}")
     stat_col3.metric("Fraudulent", f"{fraud_count:,}")
-    stat_col4.metric("Original Fraud rate", f"{fraud_rate * 100:.2f}%")
+    stat_col4.metric("Fraud rate", f"{fraud_rate * 100:.2f}%")
 
     balance_df = pd.DataFrame(
         {"Count": [legit_count, fraud_count]},
@@ -253,31 +258,36 @@ def render_dashboard(cleaned_df: pd.DataFrame, artifacts: dict) -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Credit Card Fraud Detection", page_icon="💳", layout="wide")
-    
-    # Injection of Custom CSS themes
     st.markdown("""
     <style>
+    /* Main app */
     .stApp { background-color: #f5f7fb; }
+    /* Header */
     .main-header {
         background: linear-gradient(135deg, #1e3c72, #2a5298);
         padding: 25px; border-radius: 15px; text-align: center; color: white; margin-bottom: 20px;
         box-shadow: 0px 4px 15px rgba(0,0,0,0.15);
     }
+    /* Section containers */
     .custom-box {
         background: white; padding: 20px; border-radius: 12px; border-left: 6px solid #2a5298;
         box-shadow: 0px 3px 10px rgba(0,0,0,0.08); margin-bottom: 15px;
     }
+    /* Horizontal separator */
     hr { border: none; height: 2px; background: linear-gradient(to right,#2a5298,#00c6ff); margin: 20px 0; }
+    /* Tabs */
     .stTabs [data-baseweb="tab-list"] { gap: 12px; }
     .stTabs [data-baseweb="tab"] { background-color: #eef2ff; border-radius: 10px; padding: 10px 20px; }
     .stTabs [aria-selected="true"] { background-color: #2a5298 !important; color: white !important; }
+    /* Buttons */
     .stButton > button {
         background: linear-gradient(135deg,#2a5298,#00c6ff); color: white; border-radius: 10px;
         border: none; font-weight: bold; padding: 0.5rem 1.5rem;
     }
     .stButton > button:hover { transform: scale(1.02); transition: 0.2s; }
-    section[data-testid="stSidebar"] { background: linear-gradient(180deg,#1e3c72,#2a5298); }
-    section[data-testid="stSidebar"] * { color: white; }
+    /* Sidebar styling */
+    # section[data-testid="stSidebar"] { background: linear-gradient(180deg,#1e3c72,#2a5298); }
+    # section[data-testid="stSidebar"] * { color: white; }
     </style>
     """, unsafe_allow_html=True)
     
@@ -288,19 +298,17 @@ def main() -> None:
     </div>
     """, unsafe_allow_html=True)
 
-    # Initialize basic application states
     if "transaction_history" not in st.session_state:
         st.session_state.transaction_history = []
     if "decision_threshold" not in st.session_state:
         st.session_state.decision_threshold = 0.5
 
-    # --- Sidebar Configuration Selector Integration ---
+    # --- Top Left Sidebar Input Component ---
     st.sidebar.header("Model Settings")
     balancing_method = st.sidebar.selectbox(
-        "Data Balancing Strategy",
-        options=["None", "class_weight", "SMOTE"],
-        index=1,  # Defualts to class_weight
-        help="Select how to manage dataset structural skewness during training."
+        "Select dataset balancing strategy for model training:",
+        options=["None", "Class Weight", "SMOTE"],
+        index=1,
     )
 
     if DATA_PATH.exists():
@@ -308,13 +316,16 @@ def main() -> None:
         quality = assess_data_quality(df)
         cleaned_df, cleaning_steps = clean_data(df)
 
-        # Triggers dynamic cache training when dropdown changes
         artifacts = get_or_train_model(cleaned_df, balancing_method)
         model = artifacts["model"]
         metrics = artifacts["metrics"]
 
         save_artifacts(model=model, artifacts=artifacts, cleaned_df=cleaned_df)
 
+        # Pre-cache remaining models natively so comparison tab acts instantaneously
+        cw_art = get_or_train_model(cleaned_df, "class_weight")
+        smote_art = get_or_train_model(cleaned_df, "SMOTE")
+        none_art = get_or_train_model(cleaned_df, "None")
     else:
         cached = load_artifacts()
         if cached is None:
@@ -327,9 +338,10 @@ def main() -> None:
         artifacts = {"y_test": cached["y_test"], "fraud_proba": cached["fraud_proba"]}
         quality = {"missing_values": 0, "duplicate_rows": 0, "infinite_values": 0, "invalid_class_values": 0}
         cleaning_steps = ["Loaded previously trained model configurations."]
+        cw_art, smote_art, none_art = None, None, None
 
-    # Display expanded data profiles and operational status metrics
-    with st.expander("Data quality & model training status", expanded=False):
+    # Operational Diagnostic Collapse Container
+    with st.expander("Data quality & model training", expanded=False):
         quality_col1, quality_col2, quality_col3, quality_col4 = st.columns(4)
         quality_col1.metric("Missing values", quality["missing_values"])
         quality_col2.metric("Duplicate rows", quality["duplicate_rows"])
@@ -340,23 +352,57 @@ def main() -> None:
         for step in cleaning_steps:
             st.write(f"- {step}")
 
-        st.write(f"Active balancing method strategy: **{balancing_method}**")
-
         metric_col1, metric_col2, metric_col3 = st.columns(3)
-        metric_col1.metric("Training set samples", f"{metrics['train_rows']:,}")
-        metric_col2.metric("Test set samples", f"{metrics['test_rows']:,}")
-        metric_col3.metric("Initial validation F1-Score", f"{metrics['f1_fraud']:.3f}")
+        metric_col1.metric("Training rows", f"{metrics['train_rows']:,}")
+        metric_col2.metric("Test rows", f"{metrics['test_rows']:,}")
+        metric_col3.metric("F1 (fraud class)", f"{metrics['f1_fraud']:.3f}")
 
-        with st.expander("Base classification performance report"):
+        with st.expander("Classification report (hold-out test set)"):
             st.text(metrics["report"])
 
-    detector_tab, dashboard_tab = st.tabs(["Fraud Detector", "Dashboard"])
+    # Navbar structure updated to contain the requested "Compare Strategies" option
+    detector_tab, dashboard_tab, compare_tab = st.tabs(["Fraud Detector", "Dashboard", "Compare Strategies"])
 
     with detector_tab:
         render_detector(cleaned_df, model)
 
     with dashboard_tab:
         render_dashboard(cleaned_df, artifacts)
+
+    with compare_tab:
+        st.subheader("Balancing Strategy Performance Metrics Table")
+        
+        if cw_art and smote_art and none_art:
+            # Build clean data structure out of dataframes
+            comp_df = pd.DataFrame({
+                "Strategy Method": ["None (Unbalanced)", "class_weight", "SMOTE Resampling"],
+                "Validation F1-Score": [
+                    none_art["metrics"]["f1_fraud"], 
+                    cw_art["metrics"]["f1_fraud"], 
+                    smote_art["metrics"]["f1_fraud"]
+                ],
+                "Training Matrix Sample Size": [
+                    none_art["metrics"]["train_rows"], 
+                    cw_art["metrics"]["train_rows"], 
+                    smote_art["metrics"]["train_rows"]
+                ]
+            })
+            
+            # Show Table Matrix
+            st.dataframe(comp_df, use_container_width=True, hide_index=True)
+            
+            # Show Bar Chart Visualization 
+            st.subheader("F1-Score Comparison Bar Chart")
+            chart_data = pd.DataFrame({
+                "F1-Score": [
+                    none_art["metrics"]["f1_fraud"], 
+                    cw_art["metrics"]["f1_fraud"], 
+                    smote_art["metrics"]["f1_fraud"]
+                ]
+            }, index=["None", "class_weight", "SMOTE"])
+            st.bar_chart(chart_data)
+        else:
+            st.info("Comparison visualization only active when initializing app with source dataset present.")
 
 
 if __name__ == "__main__":

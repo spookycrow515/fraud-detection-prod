@@ -25,10 +25,12 @@ def get_api_leaderboard() -> list:
         return []
 
 
-def get_api_prediction(features_dict: dict, algo: str, strategy: str) -> dict:
-    """Sends transaction payload over the network to the API inference engine."""
+# app.py (Modified endpoint integration)
+def get_api_prediction(features_dict: dict, algo: str, strategy: str, threshold: float) -> dict:
+    """Sends transaction payload over the network to the API inference engine with explicit threshold maps."""
     try:
-        params = {"algo": algo, "strategy": strategy}
+        # Pass the dynamic slider threshold directly into the backend API parameter block!
+        params = {"algo": algo, "strategy": strategy, "threshold": threshold}
         response = requests.post(
             f"{API_URL}/predict", 
             json=features_dict, 
@@ -50,7 +52,7 @@ def record_transaction(amount: float, fraud_proba: float, threshold: float, mode
     confidence = fraud_proba if prediction == "Fraud" else 1 - fraud_proba
     entry = {
         "Checked at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Model Used": model_name,  # <-- NEW COLUMN ADDED HERE
+        "Model Used": model_name,
         "Amount": round(amount, 2),
         "Fraud probability": round(fraud_proba * 100, 2),
         "Threshold": round(threshold, 2),
@@ -95,7 +97,8 @@ def render_prediction_form(reference_df: pd.DataFrame) -> pd.DataFrame:
     row = {**v_values, "Amount": amount_val}
     return pd.DataFrame([row], columns=FEATURE_COLUMNS)
 
-def render_detector(cleaned_df: pd.DataFrame, model, model_name: str) -> None:
+
+def render_detector(cleaned_df: pd.DataFrame, model_architecture: str, balancing_method: str) -> None:
     st.subheader("Data overview")
     overview_col1, overview_col2, overview_col3 = st.columns(3)
     overview_col1.metric("Rows", "283,726")
@@ -109,8 +112,10 @@ def render_detector(cleaned_df: pd.DataFrame, model, model_name: str) -> None:
     if st.button("Predict transaction", type="primary"):
         features_dict = input_df[FEATURE_COLUMNS].iloc[0].to_dict()
         
+        # Inside render_detector() in app.py:
         with st.spinner("Streaming transaction payload to inference engine..."):
-            result = get_api_prediction(features_dict, model_architecture, balancing_method)
+            # Pass the current session state cutoff criteria
+            result = get_api_prediction(features_dict, model_architecture, balancing_method, threshold)
         
         if result:
             fraud_proba = result["fraud_probability"]
@@ -120,8 +125,7 @@ def render_detector(cleaned_df: pd.DataFrame, model, model_name: str) -> None:
             legit_confidence = (1 - fraud_proba) * 100
             fraud_confidence = fraud_proba * 100
 
-        # <-- Updated here to record the model name
-        record_transaction(float(input_df["Amount"].iloc[0]), fraud_proba, threshold, model_name)
+            record_transaction(float(input_df["Amount"].iloc[0]), fraud_proba, threshold, model_used)
 
             if prediction_label == "Fraud":
                 st.error(f"**🚨 Fraud** — confidence: **{fraud_confidence:.2f}%** (threshold: {threshold:.2f})")
@@ -232,7 +236,6 @@ def main() -> None:
         color: #0f172a !important;
         font-weight: bold !important;
     }
-    /* Ensures options inside dropdown panels look clean and legible */
     div[data-baseweb="popover"] * {
         background-color: #ffffff !important;
         color: #0f172a !important;
@@ -255,10 +258,9 @@ def main() -> None:
     if "decision_threshold" not in st.session_state:
         st.session_state.decision_threshold = 0.5
 
-# --- Sidebar Dropdown Controls Block ---
+    # --- Sidebar Dropdown Controls Block ---
     st.sidebar.header("Model Settings")
     
-    # Pre-existing Balancing Selector
     balancing_method = st.sidebar.selectbox(
         "Data Balancing Strategy",
         options=["None", "class_weight", "SMOTE"],
@@ -266,7 +268,6 @@ def main() -> None:
         help="Select how to manage dataset structural skewness during training."
     )
     
-    # NEW: Model Architecture Selector
     model_architecture = st.sidebar.selectbox(
         "Model Architecture",
         options=["Random Forest", "XGBoost"],
@@ -274,44 +275,31 @@ def main() -> None:
         help="Choose the underlying machine learning classifier algorithm."
     )
 
-    # --- PIPELINE RESILIENT MULTI-MODEL HANDLING BLOCK ---
-    if DATA_PATH.exists():
-        df = load_data()
-        quality = assess_data_quality(df)
-        cleaned_df, cleaning_steps = clean_data(df)
+    # --- FETCH LIVE DATA CONTRACT FROM BACKEND API ---
+    leaderboard_data = get_api_leaderboard()
+    
+    # Locate current selected parameters inside API telemetry metrics array
+    current_metrics = {}
+    for item in leaderboard_data:
+        if item["algorithm"] == model_architecture and item["strategy"] == balancing_method:
+            current_metrics = item
+            break
 
-        # Automatically processes and caches all model configurations
-        pipeline_artifacts = load_or_train_pipeline(cleaned_df)
+    # Load fallback test variables for the generator layout
+    if TEMP_DATA_PATH.exists():
+        cleaned_df = pd.read_csv(TEMP_DATA_PATH)
+        cleaning_steps = ["Loaded sample metrics dynamically from backend API records.", "Random value assignment using temp.csv active."]
     else:
-        try:
-            pipeline_artifacts = load_or_train_pipeline()
-        except FileNotFoundError:
-            st.error("Severe Exception: Absolute system assets missing. Place `creditcard_2023.csv` in repository root.")
-            st.stop()
+        cleaned_df = pd.DataFrame(columns=FEATURE_COLUMNS)
+        cleaning_steps = ["Loaded sample metrics dynamically from backend API records.", "Warning: temp.csv missing. Sampling disabled."]
 
-        quality = {"missing_values": 0, "duplicate_rows": 0, "infinite_values": 0, "invalid_class_values": 0}
-        
-        if TEMP_DATA_PATH.exists():
-            cleaned_df = pd.read_csv(TEMP_DATA_PATH)
-            cleaning_steps = ["Loaded fallback random testing instances from temp.csv."]
-        else:
-            cleaned_df = pd.DataFrame(columns=FEATURE_COLUMNS + [TARGET_COLUMN])
-            cleaning_steps = ["Warning: temp.csv missing. Random testing features are disabled."]
+    # Diagnostic Logs Display Container
+    with st.expander("System data quality & API telemetry logs", expanded=False):
+        quality_col1, quality_col2 = st.columns(2)
+        quality_col1.metric("API Status", "Connected" if leaderboard_data else "Disconnected")
+        quality_col2.metric("Total API Models", len(leaderboard_data))
 
-    # Dynamic extraction of the current UI configuration selection choice
-    artifacts = pipeline_artifacts[model_architecture][balancing_method]
-    model = artifacts["model"]
-    metrics = artifacts["metrics"]
-
-    # Diagnostic Dropdown Wrapper Element
-    with st.expander("Data quality & model training status logs", expanded=False):
-        quality_col1, quality_col2, quality_col3, quality_col4 = st.columns(4)
-        quality_col1.metric("Missing values", quality["missing_values"])
-        quality_col2.metric("Duplicate rows", quality["duplicate_rows"])
-        quality_col3.metric("Infinite values", quality["infinite_values"])
-        quality_col4.metric("Invalid labels", quality["invalid_class_values"])
-
-        st.subheader("Cleaning summary")
+        st.subheader("System Summary")
         for step in cleaning_steps:
             st.write(f"- {step}")
 
@@ -322,64 +310,53 @@ def main() -> None:
             metric_col3.metric("F1 Score", f"{current_metrics.get('f1_score_fraud', 0.0):.3f}")
 
     # --- TAB NAVIGATION MATRIX ---
-    # Replaced 'Compare Strategies' with 'Leaderboard'
     detector_tab, dashboard_tab, leaderboard_tab = st.tabs(["Fraud Detector", "Dashboard", "Leaderboard"])
 
     with detector_tab:
-        render_detector(cleaned_df, model, model_architecture)
+        render_detector(cleaned_df, model_architecture, balancing_method)
 
     with dashboard_tab:
-        render_dashboard(cleaned_df, artifacts)
+        render_dashboard(cleaned_df, current_metrics)
 
     with leaderboard_tab:
         st.subheader("🏆 Model Performance Leaderboard")
-        st.caption("All combinations ranked automatically by their F1-Score evaluation metrics.")
+        st.caption("All combinations ranked automatically by their F1-Score evaluation metrics from the API service.")
 
-        # Gather and build leaderboard rows dynamically across all models and runs
-        leaderboard_data = []
-        for algo_name, strategies in pipeline_artifacts.items():
-            for strategy_name, data in strategies.items():
-                leaderboard_data.append({
-                    "Algorithm": algo_name,
-                    "Balancing Strategy": strategy_name,
-                    "F1-Score (Fraud)": data["metrics"]["f1_fraud"],
-                    "Training Matrix Size": data["metrics"]["train_rows"]
-                })
+        if leaderboard_data:
+            ld_df = pd.DataFrame(leaderboard_data)
+            
+            # Re-map columns for production layout styling
+            ld_df.columns = ["Algorithm", "Balancing Strategy", "F1-Score (Fraud)", "Training Matrix Size", "Test Matrix Size"]
+            
+            champion_algo = ld_df.iloc[0]["Algorithm"]
+            champion_strategy = ld_df.iloc[0]["Balancing Strategy"]
+            champion_f1 = ld_df.iloc[0]["F1-Score (Fraud)"]
 
-        # Process leaderboard sort orders
-        ld_df = pd.DataFrame(leaderboard_data).sort_values(by="F1-Score (Fraud)", ascending=False).reset_index(drop=True)
-        
-        # Identify the Champion entry
-        champion_algo = ld_df.iloc[0]["Algorithm"]
-        champion_strategy = ld_df.iloc[0]["Balancing Strategy"]
-        champion_f1 = ld_df.iloc[0]["F1-Score (Fraud)"]
+            st.markdown(f"""
+            <div style="background-color: #f0fdf4; border: 2px solid #16a34a; padding: 20px; border-radius: 12px; margin-bottom: 25px;">
+                <h3 style="color: #16a34a; margin-top: 0;">🥇 Current Champion Variant</h3>
+                <p style="color: #14532d; font-size: 1.15rem; margin-bottom: 0;">
+                    The best performing setup is <strong>{champion_algo}</strong> utilizing the <strong>{champion_strategy}</strong> strategy 
+                    yielding an F1-Score of <strong>{champion_f1:.4f}</strong>.
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
 
-        # High-Contrast Callout Display Container for non-technical users
-        st.markdown(f"""
-        <div style="background-color: #f0fdf4; border: 2px solid #16a34a; padding: 20px; border-radius: 12px; margin-bottom: 25px;">
-            <h3 style="color: #16a34a; margin-top: 0;">🥇 Current Champion Variant</h3>
-            <p style="color: #14532d; font-size: 1.15rem; margin-bottom: 0;">
-                The best performing setup is <strong>{champion_algo}</strong> utilizing the <strong>{champion_strategy}</strong> strategy 
-                yielding an F1-Score of <strong>{champion_f1:.4f}</strong>.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
+            def highlight_champion(row):
+                if row["Algorithm"] == champion_algo and row["Balancing Strategy"] == champion_strategy:
+                    return ["background-color: #bbf7d0; font-weight: bold; color: #0f172a;"] * len(row)
+                return ["color: #0f172a;"] * len(row)
 
-        # Style and project table matrix layout
-        def highlight_champion(row):
-            if row["Algorithm"] == champion_algo and row["Balancing Strategy"] == champion_strategy:
-                return ["background-color: #bbf7d0; font-weight: bold; color: #0f172a;"] * len(row)
-            return ["color: #0f172a;"] * len(row)
+            styled_ld_df = ld_df.style.apply(highlight_champion, axis=1).format({"F1-Score (Fraud)": "{:.4f}", "Training Matrix Size": "{:,}"})
+            st.dataframe(styled_ld_df, use_container_width=True, hide_index=True)
 
-        styled_ld_df = ld_df.style.apply(highlight_champion, axis=1).format({"F1-Score (Fraud)": "{:.4f}", "Training Matrix Size": "{:,}"})
-        st.dataframe(styled_ld_df, use_container_width=True, hide_index=True)
-
-        # Comparative Visualization Chart
-        st.subheader("F1-Score Comparison Across Configurations")
-        chart_df = ld_df.copy()
-        chart_df["Configuration"] = chart_df["Algorithm"] + " (" + chart_df["Balancing Strategy"] + ")"
-        chart_df = chart_df.set_index("Configuration")[["F1-Score (Fraud)"]]
-        st.bar_chart(chart_df)
+            st.subheader("F1-Score Comparison Across Configurations")
+            chart_df = ld_df.copy()
+            chart_df["Configuration"] = chart_df["Algorithm"] + " (" + chart_df["Balancing Strategy"] + ")"
+            chart_df = chart_df.set_index("Configuration")[["F1-Score (Fraud)"]]
+            st.bar_chart(chart_df)
+        else:
+            st.info("No active pipeline configuration metrics found on backend API registries.")
 
 
 if __name__ == "__main__":

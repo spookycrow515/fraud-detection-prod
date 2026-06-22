@@ -39,6 +39,8 @@ The app also supports the original Kaggle-style `creditcard.csv` in the folder f
 internship/
 ├── app.py                 # Streamlit application
 ├── creditcard_2023.csv    # Primary dataset
+├── creditcard.csv         # Original reference dataset (optional)
+├── fraud.ipynb            # Exploratory notebook (optional)
 ├── requirements.txt       # Python dependencies
 └── README.md
 ```

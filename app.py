@@ -1,90 +1,48 @@
 # app.py
 from pathlib import Path
-import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
-from sklearn.metrics import precision_score, recall_score
+import requests
 
-# Import from our multi-model backend
-from model import (
-    get_or_train_all_models, 
-    DATA_PATH, 
-    FEATURE_COLUMNS, 
-    TARGET_COLUMN,
-    TEMP_DATA_PATH
-)
+# FastAPI Backend Endpoint - Single Source of Truth
+API_URL = "http://127.0.0.1:8000"
+
+# Fallback path if you need to pull mock features locally
+TEMP_DATA_PATH = Path("temp.csv")
+FEATURE_COLUMNS = [f"V{i}" for i in range(1, 29)] + ["Amount"]
 
 
-def load_data() -> pd.DataFrame:
-    if not DATA_PATH.exists():
-        st.error(f"Dataset not found at `{DATA_PATH}`. Place `creditcard_2023.csv` in the same folder as this app.")
-        st.stop()
-    return pd.read_csv(DATA_PATH)
+def get_api_leaderboard() -> list:
+    """Fetches the live ranked model metrics matrix directly from the FastAPI endpoint."""
+    try:
+        response = requests.get(f"{API_URL}/models", timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        return []
+    except requests.exceptions.ConnectionError:
+        st.error("❌ Cannot connect to FastAPI server. Is uvicorn running on port 8000?")
+        return []
 
 
-def assess_data_quality(df: pd.DataFrame) -> dict:
-    return {
-        "missing_values": int(df.isnull().sum().sum()),
-        "duplicate_rows": int(df.duplicated().sum()),
-        "infinite_values": int(np.isinf(df.select_dtypes(include=[np.number])).sum().sum()),
-        "invalid_class_values": int((~df[TARGET_COLUMN].isin([0, 1])).sum()) if TARGET_COLUMN in df.columns else 0,
-    }
-
-
-def clean_data(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    cleaned = df.copy()
-    steps: list[str] = []
-
-    if "id" in cleaned.columns:
-        cleaned = cleaned.drop(columns=["id"])
-        steps.append("Dropped `id` column (identifier, not used for modeling).")
-
-    if cleaned[TARGET_COLUMN].dtype == object:
-        cleaned[TARGET_COLUMN] = pd.to_numeric(cleaned[TARGET_COLUMN], errors="coerce")
-        steps.append("Converted `Class` to numeric.")
-
-    missing_before = cleaned.isnull().sum().sum()
-    if missing_before:
-        cleaned = cleaned.dropna()
-        steps.append(f"Dropped rows with missing values ({missing_before} missing cells).")
-
-    duplicates = cleaned.duplicated().sum()
-    if duplicates:
-        cleaned = cleaned.drop_duplicates()
-        steps.append(f"Removed {duplicates} duplicate rows.")
-
-    numeric_cols = cleaned.select_dtypes(include=[np.number]).columns
-    inf_mask = np.isinf(cleaned[numeric_cols]).any(axis=1)
-    inf_count = int(inf_mask.sum())
-    if inf_count:
-        cleaned = cleaned.loc[~inf_mask]
-        steps.append(f"Removed {inf_count} rows containing infinite values.")
-
-    invalid_class = (~cleaned[TARGET_COLUMN].isin([0, 1])).sum()
-    if invalid_class:
-        cleaned = cleaned[cleaned[TARGET_COLUMN].isin([0, 1])]
-        steps.append(f"Removed {invalid_class} rows with invalid class labels.")
-
-    cleaned[TARGET_COLUMN] = cleaned[TARGET_COLUMN].astype(int)
-    if not steps:
-        steps.append("No cleaning required. Dataset was already in good shape.")
-
-    return cleaned.reset_index(drop=True), steps
-
-
-# Cache the full pipeline load/train routine to keep interface changes instant
-@st.cache_resource(show_spinner="Processing pipeline model matrices...")
-def load_or_train_pipeline(cleaned_df=None) -> dict:
-    return get_or_train_all_models(cleaned_df)
-
-
-def threshold_metrics(y_true: np.ndarray, fraud_proba: np.ndarray, threshold: float) -> dict[str, float]:
-    y_pred = (fraud_proba >= threshold).astype(int)
-    return {
-        "precision": float(precision_score(y_true, y_pred, pos_label=1, zero_division=0)),
-        "recall": float(recall_score(y_true, y_pred, pos_label=1, zero_division=0)),
-    }
+def get_api_prediction(features_dict: dict, algo: str, strategy: str) -> dict:
+    """Sends transaction payload over the network to the API inference engine."""
+    try:
+        params = {"algo": algo, "strategy": strategy}
+        response = requests.post(
+            f"{API_URL}/predict", 
+            json=features_dict, 
+            params=params,
+            timeout=5
+        )
+        if response.status_code == 200:
+            return response.json()
+        else:
+            st.error(f"Error from API: {response.json().get('detail')}")
+            return None
+    except requests.exceptions.ConnectionError:
+        st.error("❌ API server is unreachable.")
+        return None
 
 
 def record_transaction(amount: float, fraud_proba: float, threshold: float, model_name: str) -> None:
@@ -108,9 +66,8 @@ def render_prediction_form(reference_df: pd.DataFrame) -> pd.DataFrame:
     st.subheader("Enter transaction details")
 
     if st.button("Fill random values"):
-        # CRITICAL FIX: Check if reference data contains any rows to sample from
         if reference_df.empty:
-            st.warning("⚠️ Cannot sample random values: App is running in offline cache mode with no underlying dataset loaded.")
+            st.warning("⚠️ Cannot sample random values: No local test features available.")
         else:
             sample = reference_df[FEATURE_COLUMNS].sample(1, random_state=None).iloc[0]
             st.session_state["amount"] = float(sample["Amount"])
@@ -150,41 +107,43 @@ def render_detector(cleaned_df: pd.DataFrame, model, model_name: str) -> None:
     threshold = st.session_state.decision_threshold
 
     if st.button("Predict transaction", type="primary"):
-        features = input_df[FEATURE_COLUMNS]
-        probabilities = model.predict_proba(features)[0]
-        fraud_proba = float(probabilities[1])
-        prediction = 1 if fraud_proba >= threshold else 0
+        features_dict = input_df[FEATURE_COLUMNS].iloc[0].to_dict()
+        
+        with st.spinner("Streaming transaction payload to inference engine..."):
+            result = get_api_prediction(features_dict, model_architecture, balancing_method)
+        
+        if result:
+            fraud_proba = result["fraud_probability"]
+            prediction_label = result["prediction"]
+            model_used = result["model_used"]
 
-        legit_confidence = (1 - fraud_proba) * 100
-        fraud_confidence = fraud_proba * 100
+            legit_confidence = (1 - fraud_proba) * 100
+            fraud_confidence = fraud_proba * 100
 
         # <-- Updated here to record the model name
         record_transaction(float(input_df["Amount"].iloc[0]), fraud_proba, threshold, model_name)
 
-        if prediction == 1:
-            label = "Fraud"
-            confidence = fraud_confidence
-            st.error(f"**{label}** — confidence: **{confidence:.2f}%** (threshold: {threshold:.2f})")
-        else:
-            label = "Legit"
-            confidence = legit_confidence
-            st.success(f"**{label}** — confidence: **{confidence:.2f}%** (threshold: {threshold:.2f})")
+            if prediction_label == "Fraud":
+                st.error(f"**🚨 Fraud** — confidence: **{fraud_confidence:.2f}%** (threshold: {threshold:.2f})")
+                st.caption(f"Evaluated by backend microservice: {model_used}")
+            else:
+                st.success(f"**✅ Legit** — confidence: **{legit_confidence:.2f}%** (threshold: {threshold:.2f})")
+                st.caption(f"Evaluated by backend microservice: {model_used}")
 
-        st.progress(confidence / 100)
-        st.write(
-            f"Legit probability: **{legit_confidence:.2f}%** · "
-            f"Fraud probability: **{fraud_confidence:.2f}%**"
-        )
+            st.progress(fraud_confidence / 100)
+            st.write(
+                f"Legit probability: **{legit_confidence:.2f}%** · "
+                f"Fraud probability: **{fraud_confidence:.2f}%**"
+            )
 
 
-def render_dashboard(cleaned_df: pd.DataFrame, artifacts: dict) -> None:
+def render_dashboard(cleaned_df: pd.DataFrame, current_metrics: dict) -> None:
     st.markdown("""
     <div class='custom-box'>
     <h3>Dataset Overview</h3>
     </div>
     """, unsafe_allow_html=True)
 
-    class_counts = cleaned_df[TARGET_COLUMN].value_counts().sort_index()
     legit_count = 283253
     fraud_count = 473
     total_count = legit_count + fraud_count
@@ -203,9 +162,9 @@ def render_dashboard(cleaned_df: pd.DataFrame, artifacts: dict) -> None:
     st.bar_chart(balance_df)
 
     st.subheader("Decision threshold")
-    st.caption("Adjust the fraud-probability cutoff used for predictions and see hold-out test metrics update live.")
+    st.caption("Adjust the fraud-probability cutoff used for predictions and track metadata configurations.")
 
-    threshold = st.slider(
+    st.slider(
         "Fraud probability threshold",
         min_value=0.0,
         max_value=1.0,
@@ -214,10 +173,9 @@ def render_dashboard(cleaned_df: pd.DataFrame, artifacts: dict) -> None:
         key="decision_threshold",
     )
 
-    live_metrics = threshold_metrics(artifacts["y_test"], artifacts["fraud_proba"], threshold)
     metric_col1, metric_col2 = st.columns(2)
-    metric_col1.metric("Precision (fraud)", f"{live_metrics['precision']:.3f}")
-    metric_col2.metric("Recall (fraud)", f"{live_metrics['recall']:.3f}")
+    metric_col1.metric("Active Variant F1-Score", f"{current_metrics.get('f1_score_fraud', 0.0):.4f}")
+    metric_col2.metric("Target Variant Training Size", f"{current_metrics.get('train_rows', 'N/A')}")
 
     st.subheader("Recent checks")
     if st.session_state.transaction_history:
@@ -304,7 +262,7 @@ def main() -> None:
     balancing_method = st.sidebar.selectbox(
         "Data Balancing Strategy",
         options=["None", "class_weight", "SMOTE"],
-        index=1,
+        index=2,
         help="Select how to manage dataset structural skewness during training."
     )
     
@@ -357,13 +315,11 @@ def main() -> None:
         for step in cleaning_steps:
             st.write(f"- {step}")
 
-        metric_col1, metric_col2, metric_col3 = st.columns(3)
-        metric_col1.metric("Training rows", f"{metrics['train_rows']:,}")
-        metric_col2.metric("Test rows", f"{metrics['test_rows']:,}")
-        metric_col3.metric("F1 (fraud class)", f"{metrics['f1_fraud']:.3f}")
-
-        with st.expander("Classification report (hold-out test set)"):
-            st.text(metrics["report"])
+        if current_metrics:
+            metric_col1, metric_col2, metric_col3 = st.columns(3)
+            metric_col1.metric("Training Rows", f"{current_metrics.get('train_rows', 0):,}")
+            metric_col2.metric("Test Rows", f"{current_metrics.get('test_rows', 0):,}")
+            metric_col3.metric("F1 Score", f"{current_metrics.get('f1_score_fraud', 0.0):.3f}")
 
     # --- TAB NAVIGATION MATRIX ---
     # Replaced 'Compare Strategies' with 'Leaderboard'

@@ -1,154 +1,130 @@
 # api.py
-from pathlib import Path
-import joblib
-import numpy as np
-import pandas as pd
+import contextlib
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+import joblib
+from pathlib import Path
+import pandas as pd
+import mlflow
 
-# Initialize FastAPI engine
+# Define schema contract
+class TransactionPayload(BaseModel):
+    V1: float; V2: float; V3: float; V4: float; V5: float
+    V6: float; V7: float; V8: float; V9: float; V10: float
+    V11: float; V12: float; V13: float; V14: float; V15: float
+    V16: float; V17: float; V18: float; V19: float; V20: float
+    V21: float; V22: float; V23: float; V24: float; V25: float
+    V26: float; V27: float; V28: float; Amount: float
+
+# Global production memory state
+ml_models_registry = {}
+
+# 1. NEW: Replace deprecated on_event with enterprise lifespan management
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Handles startup model deserialization and connection pool bootstrapping.
+    Warms up cache layers inside system memory RAM for rapid inference execution.
+    """
+    print("⏳ Initializing FastAPI production infrastructure layers...")
+    
+    # Connect and lock down your MLflow baseline tracking server
+    mlflow.set_tracking_uri("http://localhost:5000")
+    
+    # Bootstrap your models from your local workspace files
+    # (Maintains fallback data pipelines cleanly)
+    from model import ALGORITHMS, STRATEGIES, get_model_path
+    
+    for algo in ALGORITHMS:
+        ml_models_registry[algo] = {}
+        for strategy in STRATEGIES:
+            path = get_model_path(algo, strategy)
+            if path.exists():
+                ml_models_registry[algo][strategy] = joblib.load(path)
+                print(f"📦 Successfully warmed up: {algo} ({strategy}) into RAM.")
+            else:
+                print(f"⚠️ Warning: Pre-trained model matrix file missing at {path}")
+                
+    yield # Execution boundary partition (Server handles traffic here)
+    
+    # Cleanup tasks on shutdown (if any) can go here
+    print("🛑 Draining connections and shutting down microservice routing...")
+
+# Initialize the primary application app shell utilizing our lifespan manager
 app = FastAPI(
-    title="Credit Card Fraud Detection API",
-    description="Production-grade REST engine serving Random Forest and XGBoost inference microservices.",
-    version="1.0.0"
+    title="Enterprise Fraud Inference Microservice", 
+    version="1.1.0",
+    lifespan=lifespan
 )
 
-MODEL_DIR = Path(__file__).parent
-
-# Internal structures to hold models and metadata matrices in memory
-pipelines_pool = {}
-leaderboard_cache = []
-
-@app.on_event("startup")
-def load_all_pipelines():
-    """
-    Scans the directory for trained model packages, registers them into memory,
-    and constructs an internal JSON leaderboard ranked by validation F1-Score.
-    """
-    global pipelines_pool, leaderboard_cache
-    
-    # Mirroring the matrix structures from model.py
-    algorithms = ["Random Forest", "XGBoost"]
-    strategies = ["None", "class_weight", "SMOTE"]
-    
-    raw_leaderboard = []
-
-    for algo in algorithms:
-        algo_slug = algo.lower().replace(" ", "_")
-        pipelines_pool[algo] = {}
-        
-        for strategy in strategies:
-            filename = f"fraud_model_{algo_slug}_{strategy}.pkl"
-            filepath = MODEL_DIR / filename
-            
-            if filepath.exists():
-                try:
-                    artifacts = joblib.load(filepath)
-                    # Cache the live binary pipeline for inference lookup
-                    pipelines_pool[algo][strategy] = artifacts
-                    
-                    # Extract telemetry metrics for the leaderboard
-                    f1 = artifacts["metrics"].get("f1_fraud", 0.0)
-                    raw_leaderboard.append({
-                        "algorithm": algo,
-                        "strategy": strategy,
-                        "f1_score_fraud": round(f1, 4),
-                        "train_rows": artifacts["metrics"].get("train_rows", "N/A"),
-                        "test_rows": artifacts["metrics"].get("test_rows", "N/A")
-                    })
-                except Exception as e:
-                    print(f"⚠️ Failed to load artifact {filename}: {str(e)}")
-            else:
-                print(f"⚠️ Missing expected artifact file: {filename}")
-
-    # Rank the configs dynamically by F1-Score in descending order
-    leaderboard_cache = sorted(raw_leaderboard, key=lambda x: x["f1_score_fraud"], reverse=True)
-    print(f"🚀 Loaded {len(raw_leaderboard)} models. Leaderboard ranked successfully.")
-
-
-# --- DATA CONTRACT SCHEMA ---
-class TransactionFeatures(BaseModel):
-    V1: float = Field(..., example=-1.359807)
-    V2: float = Field(..., example=-0.072781)
-    V3: float = Field(..., example=2.536347)
-    V4: float = Field(..., example=1.378155)
-    V5: float = Field(..., example=-0.338321)
-    V6: float = Field(..., example=0.462388)
-    V7: float = Field(..., example=0.239599)
-    V8: float = Field(..., example=0.098698)
-    V9: float = Field(..., example=0.363787)
-    V10: float = Field(..., example=0.090794)
-    V11: float = Field(..., example=-0.551600)
-    V12: float = Field(..., example=-0.617801)
-    V13: float = Field(..., example=-0.991390)
-    V14: float = Field(..., example=-0.311169)
-    V15: float = Field(..., example=1.468177)
-    V16: float = Field(..., example=-0.470401)
-    V17: float = Field(..., example=0.207971)
-    V18: float = Field(..., example=0.025791)
-    V19: float = Field(..., example=0.403993)
-    V20: float = Field(..., example=0.251412)
-    V21: float = Field(..., example=-0.018307)
-    V22: float = Field(..., example=0.277838)
-    V23: float = Field(..., example=-0.110474)
-    V24: float = Field(..., example=0.066928)
-    V25: float = Field(..., example=0.128539)
-    V26: float = Field(..., example=-0.189115)
-    V27: float = Field(..., example=0.133558)
-    V28: float = Field(..., example=-0.021053)
-    Amount: float = Field(..., example=149.62)
-
-
-@app.get("/health", tags=["System Health"])
+@app.get("/health", tags=["Telemetry"])
 def health_check():
-    return {"status": "ok"}
-
-
-@app.get("/models", tags=["Model Registry"])
-def get_leaderboard():
-    """
-    Returns a live, ranked dashboard configuration matrix of all compiled 
-    pipelines matching F1 validation scoring.
-    """
-    if not leaderboard_cache:
-        raise HTTPException(status_code=404, detail="No models found in engine cache registry.")
-    return leaderboard_cache
-
+    """Confirms network health and checks internal memory footprint registers."""
+    return {
+        "status": "ok", 
+        "models_cached_count": sum(len(ml_models_registry[a]) for a in ml_models_registry)
+    }
 
 @app.post("/predict", tags=["Inference Engine"])
 def predict_transaction(
-    payload: TransactionFeatures,
-    algo: str = Query(default="Random Forest", description="Target variant: 'Random Forest' or 'XGBoost'"),
-    strategy: str = Query(default="SMOTE", description="Target handling strategy: 'None', 'class_weight', or 'SMOTE'")
+    payload: TransactionPayload,
+    algo: str = Query("Random Forest", description="Algorithm selection"),
+    strategy: str = Query("None", description="Balancing methodology option"),
+    threshold: float = Query(0.50, ge=0.0, le=1.0, description="Dynamic cutoff boundary criteria")
 ):
     """
-    Processes transaction records using an explicitly selected model-balancing variant combination.
-    Defaults to the historical champion configuration (Random Forest + SMOTE).
+    Intercepts standard JSON payment frames and runs validation.
+    Applies custom dynamic user threshold controls to calculate predictions.
     """
-    # Verify the selected model configuration structure exists in memory
-    if algo not in pipelines_pool or strategy not in pipelines_pool[algo]:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Configuration variant combo '{algo}' with '{strategy}' is unavailable or not pre-trained."
-        )
-
-    artifacts = pipelines_pool[algo][strategy]
-    trained_model = artifacts["model"]
-    decision_threshold = 0.50
-
-    # Format data row payload for inference
-    input_data = payload.dict()
-    feature_columns = [f"V{i}" for i in range(1, 29)] + ["Amount"]
-    features_df = pd.DataFrame([input_data])[feature_columns]
-
-    # Generate probabilities
-    probabilities = trained_model.predict_proba(features_df)[0]
-    fraud_probability = float(probabilities[1])
-    prediction_label = "Fraud" if fraud_probability >= decision_threshold else "Legit"
-
+    if algo not in ml_models_registry or strategy not in ml_models_registry[algo]:
+        raise HTTPException(status_code=404, detail="Requested pipeline variant not registered.")
+        
+    cached_package = ml_models_registry[algo][strategy]
+    trained_model = cached_package["model"]
+    
+    # Reshape the Pydantic dictionary fields into a single DataFrame row array
+    input_data = pd.DataFrame([payload.model_dump()])
+    
+    # Execute inference using warmed up weights in RAM
+    try:
+        fraud_probability = float(trained_model.predict_proba(input_data)[0, 1])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Model scoring fault: {str(e)}")
+        
+    # Apply dynamic decision boundary threshold overriding
+    prediction_label = "Fraud" if fraud_probability >= threshold else "Legit"
+    
+    # 🚀 OPTIONAL: Log this validation check directly to MLflow for absolute audit logs
+    try:
+        with mlflow.start_run(run_name=f"Inference_Audit_{algo.replace(' ', '_')}", nested=True):
+            mlflow.log_param("applied_threshold", threshold)
+            mlflow.log_metric("transaction_amount", payload.Amount)
+            mlflow.log_metric("fraud_probability", fraud_probability)
+    except Exception:
+        pass # Gracefully fall back if MLflow server tab isn't processing requests
+        
     return {
         "prediction": prediction_label,
-        "fraud_probability": round(fraud_probability, 4),
-        "model_used": f"{algo} ({strategy})",
-        "threshold": decision_threshold
+        "fraud_probability": fraud_probability,
+        "applied_threshold": threshold,
+        "model_used": f"{algo} ({strategy})"
     }
+
+@app.get("/models", tags=["Telemetry"])
+def get_leaderboard_matrix():
+    """Scans cached local artifacts to feed the Streamlit client window."""
+    leaderboard = []
+    from model import ALGORITHMS, STRATEGIES
+    for algo in ALGORITHMS:
+        for strategy in STRATEGIES:
+            if algo in ml_models_registry and strategy in ml_models_registry[algo]:
+                metrics = ml_models_registry[algo][strategy]["metrics"]
+                leaderboard.append({
+                    "algorithm": algo,
+                    "strategy": strategy,
+                    "f1_score_fraud": metrics["f1_fraud"],
+                    "train_rows": metrics["train_rows"],
+                    "test_rows": metrics["test_rows"]
+                })
+    # Sort by F1-Score descending before sending across the wire interface
+    return sorted(leaderboard, key=lambda x: x["f1_score_fraud"], reverse=True)

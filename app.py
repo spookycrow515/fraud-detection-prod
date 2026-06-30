@@ -4,9 +4,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import requests
+import os
 
-# FastAPI Backend Endpoint - Single Source of Truth
-API_URL = "http://127.0.0.1:8000"
+# FastAPI Backend Endpoint - Dynamically reads production URL with dynamic fallback
+API_URL = os.getenv("API_URL", "https://fraud-detection-prod-production.up.railway.app").rstrip("/")
 
 # Fallback path if you need to pull mock features locally
 TEMP_DATA_PATH = Path("temp.csv")
@@ -16,20 +17,21 @@ FEATURE_COLUMNS = [f"V{i}" for i in range(1, 29)] + ["Amount"]
 def get_api_leaderboard() -> list:
     """Fetches the live ranked model metrics matrix directly from the FastAPI endpoint."""
     try:
-        response = requests.get(f"{API_URL}/models", timeout=5)
+        response = requests.get(f"{API_URL}/models", timeout=30)
         if response.status_code == 200:
             return response.json()
         return []
     except requests.exceptions.ConnectionError:
-        st.error("❌ Cannot connect to FastAPI server. Is uvicorn running on port 8000?")
+        st.error(f"❌ Cannot connect to FastAPI server at {API_URL}.")
+        return []
+    except requests.exceptions.ReadTimeout:
+        st.error("⚠️ FastAPI backend is taking too long to load your trained model matrices.")
         return []
 
 
-# app.py (Modified endpoint integration)
 def get_api_prediction(features_dict: dict, algo: str, strategy: str, threshold: float) -> dict:
     """Sends transaction payload over the network to the API inference engine with explicit threshold maps."""
     try:
-        # Pass the dynamic slider threshold directly into the backend API parameter block!
         params = {"algo": algo, "strategy": strategy, "threshold": threshold}
         response = requests.post(
             f"{API_URL}/predict", 
@@ -43,7 +45,7 @@ def get_api_prediction(features_dict: dict, algo: str, strategy: str, threshold:
             st.error(f"Error from API: {response.json().get('detail')}")
             return None
     except requests.exceptions.ConnectionError:
-        st.error("❌ API server is unreachable.")
+        st.error(f"❌ API server at {API_URL} is unreachable.")
         return None
 
 
@@ -112,9 +114,7 @@ def render_detector(cleaned_df: pd.DataFrame, model_architecture: str, balancing
     if st.button("Predict transaction", type="primary"):
         features_dict = input_df[FEATURE_COLUMNS].iloc[0].to_dict()
         
-        # Inside render_detector() in app.py:
         with st.spinner("Streaming transaction payload to inference engine..."):
-            # Pass the current session state cutoff criteria
             result = get_api_prediction(features_dict, model_architecture, balancing_method, threshold)
         
         if result:
@@ -195,62 +195,44 @@ def render_dashboard(cleaned_df: pd.DataFrame, current_metrics: dict) -> None:
 def main() -> None:
     st.markdown("""
     <style>
-    /* Main app layout backgrounds for crisp Light Mode */
     .stApp { background-color: #f5f7fb; color: #0f172a; }
-    
-    /* Header branding container layout styling */
     .main-header {
         background: linear-gradient(135deg, #1e3c72, #2a5298);
         padding: 25px; border-radius: 15px; text-align: center; color: white; margin-bottom: 20px;
         box-shadow: 0px 4px 15px rgba(0,0,0,0.15);
     }
-    
-    /* Elegant clean light-mode box card elements */
     .custom-box {
         background: white; padding: 20px; border-radius: 12px; border-left: 6px solid #2a5298;
         box-shadow: 0px 3px 10px rgba(0,0,0,0.08); margin-bottom: 15px; color: #0f172a;
     }
     hr { border: none; height: 2px; background: linear-gradient(to right, #2a5298, #00c6ff); margin: 20px 0; }
-    
-    /* Tab Controls matching Light Layout */
     .stTabs [data-baseweb="tab-list"] { gap: 12px; }
     .stTabs [data-baseweb="tab"] { background-color: #eef2ff; border-radius: 10px; padding: 10px 20px; color: #475569 !important; }
     .stTabs [aria-selected="true"] { background-color: #2a5298 !important; color: white !important; }
-    
-    /* Interactivity button layouts */
     .stButton > button {
         background: linear-gradient(135deg, #2a5298, #00c6ff); color: white; border-radius: 10px;
         border: none; font-weight: bold; padding: 0.5rem 1.5rem;
     }
     .stButton > button:hover { transform: scale(1.02); transition: 0.2s; box-shadow: 0px 4px 10px rgba(0,198,255,0.3); }
-    
-    /* --- SIDEBAR STYLINGS FOR HIGH-CONTRAST LIGHT MODE --- */
     section[data-testid="stSidebar"] { 
         background: linear-gradient(180deg, #ffffff, #f1f5f9) !important;
         border-right: 1px solid #cbd5e1;
     }
-    section[data-testid="stSidebar"] * { 
-        color: #0f172a !important; 
-    }
+    section[data-testid="stSidebar"] * { color: #0f172a !important; }
     section[data-testid="stSidebar"] label p, section[data-testid="stSidebar"] h2 {
-        color: #0f172a !important;
-        font-weight: bold !important;
+        color: #0f172a !important; font-weight: bold !important;
     }
-    div[data-baseweb="popover"] * {
-        background-color: #ffffff !important;
-        color: #0f172a !important;
+    div[data-baseweb="popover"] * { background-color: #ffffff !important; color: #0f172a !important; }
+    section[data-testid="stSidebar"] div[data-baseweb="select"], 
+    section[data-testid="stSidebar"] div[data-testid="stTextInput"] div {
+        background-color: #ffffff !important; border-radius: 8px !important;
     }
-
-    /* HARD LOCK: Hides settings header, footer, and the options menu entirely */
-    #MainMenu, header, footer {visibility: hidden;}
+    section[data-testid="stSidebar"] input { background-color: #ffffff !important; color: #0f172a !important; }
+    div[data-testid="stMarkdownContainer"] p { color: #0f172a; }
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
+    header[data-testid="stHeader"] { background-color: rgba(0,0,0,0) !important; }
     </style>
-    """, unsafe_allow_html=True)
-    
-    st.markdown("""
-    <div class='main-header'>
-        <h1>Credit Card Fraud Detection System</h1>
-        <p>Machine Learning Powered Fraud Analysis Dashboard</p>
-    </div>
     """, unsafe_allow_html=True)
 
     if "transaction_history" not in st.session_state:
@@ -258,7 +240,6 @@ def main() -> None:
     if "decision_threshold" not in st.session_state:
         st.session_state.decision_threshold = 0.5
 
-    # --- Sidebar Dropdown Controls Block ---
     st.sidebar.header("Model Settings")
     
     balancing_method = st.sidebar.selectbox(
@@ -275,17 +256,14 @@ def main() -> None:
         help="Choose the underlying machine learning classifier algorithm."
     )
 
-    # --- FETCH LIVE DATA CONTRACT FROM BACKEND API ---
     leaderboard_data = get_api_leaderboard()
     
-    # Locate current selected parameters inside API telemetry metrics array
     current_metrics = {}
     for item in leaderboard_data:
-        if item["algorithm"] == model_architecture and item["strategy"] == balancing_method:
+        if item.get("algorithm") == model_architecture and item.get("strategy") == balancing_method:
             current_metrics = item
             break
 
-    # Load fallback test variables for the generator layout
     if TEMP_DATA_PATH.exists():
         cleaned_df = pd.read_csv(TEMP_DATA_PATH)
         cleaning_steps = ["Loaded sample metrics dynamically from backend API records.", "Random value assignment using temp.csv active."]
@@ -293,7 +271,6 @@ def main() -> None:
         cleaned_df = pd.DataFrame(columns=FEATURE_COLUMNS)
         cleaning_steps = ["Loaded sample metrics dynamically from backend API records.", "Warning: temp.csv missing. Sampling disabled."]
 
-    # Diagnostic Logs Display Container
     with st.expander("System data quality & API telemetry logs", expanded=False):
         quality_col1, quality_col2 = st.columns(2)
         quality_col1.metric("API Status", "Connected" if leaderboard_data else "Disconnected")
@@ -309,7 +286,6 @@ def main() -> None:
             metric_col2.metric("Test Rows", f"{current_metrics.get('test_rows', 0):,}")
             metric_col3.metric("F1 Score", f"{current_metrics.get('f1_score_fraud', 0.0):.3f}")
 
-    # --- TAB NAVIGATION MATRIX ---
     detector_tab, dashboard_tab, leaderboard_tab = st.tabs(["Fraud Detector", "Dashboard", "Leaderboard"])
 
     with detector_tab:
@@ -324,8 +300,6 @@ def main() -> None:
 
         if leaderboard_data:
             ld_df = pd.DataFrame(leaderboard_data)
-            
-            # Re-map columns for production layout styling
             ld_df.columns = ["Algorithm", "Balancing Strategy", "F1-Score (Fraud)", "Training Matrix Size", "Test Matrix Size"]
             
             champion_algo = ld_df.iloc[0]["Algorithm"]
